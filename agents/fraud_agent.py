@@ -34,9 +34,12 @@ try:
 except ImportError:
     pass
 
+from typing import Optional
 from dotenv import load_dotenv
+from pydantic import SecretStr
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, MessagesState, START
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
@@ -138,7 +141,7 @@ Communication & Response Guidelines:
 
 class FraudAlertAgent:
 
-    def __init__(self, thread_id: str | None = None, debug: bool = False):
+    def __init__(self, thread_id: Optional[str] = None, debug: bool = False):
         self.app = None
         self.tools = []
         self.system_message = SystemMessage(content=SYSTEM_PROMPT)
@@ -170,10 +173,13 @@ class FraudAlertAgent:
             for tool in self.tools:
                 print(f" - {tool.name}")
 
-        # Initialize Groq LLM
+        # Validate and initialize Groq LLM
+        if not GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY is missing from .env")
+
         llm = ChatGroq(
             model="openai/gpt-oss-120b",
-            api_key=GROQ_API_KEY,
+            api_key=SecretStr(GROQ_API_KEY),
             temperature=0
         )
 
@@ -219,7 +225,7 @@ class FraudAlertAgent:
             )
 
         # Use thread_id for conversation memory state
-        config = {
+        config: RunnableConfig = {
             "configurable": {
                 "thread_id": self.thread_id
             }
