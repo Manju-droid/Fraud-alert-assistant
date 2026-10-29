@@ -1,525 +1,356 @@
-# Banking Fraud Alert Assistant
+# Banking Fraud Alert Assistant - Enterprise Setup & Deployment Guide
 
-A conversational AI assistant designed for financial fraud triage, powered by **LangGraph**, **Groq LLM** (`openai/gpt-oss-120b`), and the official **MongoDB Model Context Protocol (MCP) Server** communicating via `stdio`.
+A conversational AI assistant designed for financial fraud triage and investigation analysis, powered by **LangGraph**, **Groq LLM** (`openai/gpt-oss-120b`), and the official **MongoDB Model Context Protocol (MCP) Server** communicating over `stdio`.
 
-The assistant understands natural language queries, automatically determines when to query MongoDB, dynamically invokes official MongoDB MCP tools (`find`, `count`), and provides professional, context-aware answers with multi-turn conversation memory.
+The assistant allows fraud operations teams and analysts to query, inspect, and summarize fraud alert records using natural conversational English. It handles complex queries, executes read-only MongoDB operations, and preserves multi-turn conversation memory for seamless follow-up investigations.
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview & Architecture](#1-project-overview--architecture)
-2. [Prerequisites](#2-prerequisites)
-3. [Check Existing Installations FIRST](#3-check-existing-installations-first)
-4. [Install Missing Prerequisites](#4-install-missing-prerequisites)
-5. [Clone the Fraud Alert Assistant Repository](#5-clone-the-fraud-alert-assistant-repository)
-6. [Set Up MongoDB Locally](#6-set-up-mongodb-locally)
-7. [Seed the MongoDB Database](#7-seed-the-mongodb-database)
-8. [MongoDB MCP Server Prerequisite](#8-mongodb-mcp-server-prerequisite)
-9. [Create Python Virtual Environment](#9-create-python-virtual-environment)
-10. [Install Python Dependencies](#10-install-python-dependencies)
-11. [Configure Environment Variables](#11-configure-environment-variables)
-12. [Verify MongoDB and MCP Client Connection](#12-verify-mongodb-and-mcp-client-connection)
-13. [Run the LangGraph Agent](#13-run-the-langgraph-agent)
-14. [Example Questions & Conversational Flow](#14-example-questions--conversational-flow)
-15. [Troubleshooting Guide](#15-troubleshooting-guide)
-16. [Project Structure](#16-project-structure)
-17. [Security & Governance](#17-security--governance)
+2. [Prerequisites & Compatibility](#2-prerequisites--compatibility)
+3. [Check Existing Installations](#3-check-existing-installations)
+4. [Step-by-Step Installation & Setup](#4-step-by-step-installation--setup)
+   - [Step 1: Clone the Application Repository](#step-1-clone-the-application-repository)
+   - [Step 2: Clone the Official MongoDB MCP Server](#step-2-clone-the-official-mongodb-mcp-server)
+   - [Step 3: Build the Official MongoDB MCP Server](#step-3-build-the-official-mongodb-mcp-server)
+   - [Step 4: Create Python 3.12 Virtual Environment](#step-4-create-python-312-virtual-environment)
+   - [Step 5: Install Python Dependencies](#step-5-install-python-dependencies)
+   - [Step 6: Configure Environment Variables](#step-6-configure-environment-variables)
+5. [Environment Variables Reference](#5-environment-variables-reference)
+6. [MCP Server & Client Architecture](#6-mcp-server--client-architecture)
+7. [Verify MCP Tool Discovery & Connectivity](#7-verify-mcp-tool-discovery--connectivity)
+8. [Run the LangGraph Conversational Agent](#8-run-the-langgraph-conversational-agent)
+9. [Automated Testing Suite](#9-automated-testing-suite)
+10. [Troubleshooting Guide](#10-troubleshooting-guide)
+11. [Security, Governance & Access Control](#11-security-governance--access-control)
+12. [Production Deployment Checklist & Architecture Limitations](#12-production-deployment-checklist--architecture-limitations)
+13. [Development Utilities (Optional Seed Script)](#13-development-utilities-optional-seed-script)
+14. [Project Directory Structure](#14-project-directory-structure)
 
 ---
 
 ## 1. Project Overview & Architecture
 
 ### Purpose
-In modern banking operations, fraud analysts need quick, accurate insights into alert backlogs, transaction anomalies, geographic velocities, and investigation histories. The Fraud Alert Assistant allows analysts to query and triage MongoDB fraud alert records using conversational English—similar to ChatGPT—without writing manual MongoDB aggregation pipelines or database queries.
+In enterprise banking operations, fraud analysts need rapid, structured insights into alert backlogs, transaction anomalies, geographic velocities, and investigation outcomes. The Fraud Alert Assistant allows analysts to interact with MongoDB fraud alert collections through conversational dialogue—similar to ChatGPT—without requiring analysts to author manual aggregation pipelines or database queries.
 
-### Architecture Workflow
+### Architectural Workflow
 
 ```text
-User Question (Interactive Terminal)
+User Query (Terminal / Application Interface)
          │
          ▼
-    [Agent Node] ◄────────────────────────────────────────┐
- (Groq: openai/gpt-oss-120b)                              │
-         │                                                │
-         ▼ (tools_condition)                              │
-   Requires Tool Call?                                    │
-   ├── YES ──► [ToolNode]                                 │
-   │                │                                     │
-   │                ▼                                     │
-   │         [MCP Client] (MultiServerMCPClient)          │
-   │                │                                     │
-   │                ▼ (stdio transport)                   │
-   │   [Official MongoDB MCP Server] (node index.js)      │
-   │                │                                     │
-   │                ▼                                     │
-   │     [MongoDB Community Server] (bankdemo database)   │
-   │                │                                     │
-   │                └─────────────────────────────────────┘
+    [Agent Node] ◄────────────────────────────────────────────────────┐
+ (Groq: openai/gpt-oss-120b)                                          │
+         │                                                            │
+         ▼ (tools_condition)                                          │
+   Requires Database Query?                                           │
+   ├── YES ──► [ToolNode]                                             │
+   │                │                                                 │
+   │                ▼                                                 │
+   │         [SafeToolInterceptor]                                    │
+   │         • Enforces Read-Only Whitelist (find, count)             │
+   │         • Bounds Result Limits (1 <= limit <= MAX_RESULT_ROWS)   │
+   │         • Validates Database & Collection Scope                  │
+   │                │                                                 │
+   │                ▼                                                 │
+   │         [MultiServerMCPClient]                                   │
+   │                │                                                 │
+   │                ▼ (stdio transport: JSON-RPC)                     │
+   │   [Official MongoDB MCP Server] (node index.js)                  │
+   │                │                                                 │
+   │                ▼ (MongoDB Wire Protocol / TLS)                   │
+   │   [Enterprise MongoDB Cluster / Atlas / Server]                  │
+   │                │                                                 │
+   │                └─────────────────────────────────────────────────┘
    │
-   └── NO ───► [Final Response] (Displayed to Analyst)
+   └── NO ───► [Synthesized Conversational Answer]
+                    │
+                    ▼
+          [MemorySaver Checkpointer] (Preserves thread context)
 ```
 
-### Component Roles
+### Component Responsibilities
 
-| Component | Technology | Role |
-|---|---|---|
-| **Conversational Agent** | LangGraph `StateGraph` | Orchestrates the ReAct execution loop, manages conversation checkpointing (`MemorySaver`), and formats conversational responses. |
-| **Language Model** | Groq (`openai/gpt-oss-120b`) | Interprets user intent, selects MCP tools, generates MongoDB query criteria, and synthesizes natural-language answers. |
-| **MCP Client** | `langchain-mcp-adapters` (`MultiServerMCPClient`) | Connects Python to the MCP Server over standard I/O (`stdio`), discovers tools dynamically, and executes queries. |
-| **MCP Server** | `@mongodb-js/mongodb-mcp-server` | Official Model Context Protocol server exposing read-only MongoDB operations (`find`, `count`) to the agent. |
-| **Database** | MongoDB Community Server (v6.0+) | Local database storing the `bankdemo.fraud_alerts` collection containing 150 synthetic banking fraud tickets. |
-
----
-
-## 2. Prerequisites
-
-The following software is required to run the Fraud Alert Assistant. Review compatible versions before proceeding:
-
-| Software | Compatible Version | Purpose |
-|---|---|---|
-| **Python** | `3.12.x` | Application runtime and LangGraph agent execution. |
-| **Node.js** | `v18.x`, `v20.x`, or `v22.x` (LTS) | Runtime required to execute the MongoDB MCP Server. |
-| **Corepack & pnpm** | Corepack `0.34.0+`, pnpm `9.x` or `10.x` | Package manager required to build the MongoDB MCP Server from source. |
-| **MongoDB Server** | Community Edition `6.0+`, `7.0+`, or `8.0+` | Database engine storing demo fraud records. |
-| **MongoDB Shell** | `mongosh` `2.x+` | CLI utility to inspect and verify database records. |
-| **MongoDB MCP Server** | Official GitHub repository | Model Context Protocol server built into local ESM bundle. |
-| **Groq API Key** | Active account on [console.groq.com](https://console.groq.com) | LLM inference backend for the LangGraph agent. |
+| Component | Technology | Primary Responsibility |
+| :--- | :--- | :--- |
+| **Conversational Agent** | LangGraph (`StateGraph`), LangChain Core | Orchestrates the ReAct reasoning loop, binds tools to the LLM, and formats user responses. |
+| **Language Model** | Groq API (`openai/gpt-oss-120b`) | Generates structured tool calls based on user intent and synthesizes natural language answers. |
+| **Conversation State** | LangGraph `MemorySaver` | Preserves multi-turn conversation history per `thread_id` so users can ask contextual follow-up questions. |
+| **MCP Client Safeguards** | Python (`SafeToolInterceptor`) | Enforces read-only tool authorization, bounds query limits, and restricts database/collection scope. |
+| **MCP Subprocess Manager** | `langchain-mcp-adapters` (`MultiServerMCPClient`) | Manages the child process lifecycle, standard input/output (`stdio`) transport, and timeouts. |
+| **Official MCP Server** | `@mongodb-js/mongodb-mcp-server` (Node.js) | Official server developed by MongoDB; converts MCP tool requests into MongoDB driver queries. |
+| **Database Tier** | MongoDB (Self-hosted, Enterprise, or Atlas) | High-performance document store housing banking fraud alerts and audit trails. |
 
 ---
 
-## 3. Check Existing Installations FIRST
+## 2. Prerequisites & Compatibility
 
-Before downloading or installing any software, open your terminal and check which tools are already installed on your system.
+Before starting the setup, ensure your environment meets the minimum version requirements:
 
-Run the following commands:
+| Component | Minimum Version | Recommended Version | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Python** | `3.12.0` | `3.12.x` | Required for LangGraph agent and MCP client libraries. |
+| **Node.js** | `18.0.0` (LTS) | `20.x` or `22.x` (LTS) | Required to build and execute the official MongoDB MCP server. |
+| **Corepack & pnpm** | `pnpm 8.0.0` | `pnpm 9.x` | Package manager required to build the MongoDB MCP server repository. |
+| **Git** | `2.30.0` | Latest | For repository cloning and version control. |
+| **MongoDB** | `5.0.0` | `6.0+` or MongoDB Atlas | Company database storing fraud alert records (self-hosted or cloud). |
+| **Groq API Key** | N/A | Active Account | LLM inference provider for reasoning and tool invocation. |
+
+> [!NOTE]
+> You **do not** need to install MongoDB locally if your organization already hosts a shared MongoDB development, staging, or Atlas cluster. The assistant connects over network URIs using standard authentication and TLS.
+
+---
+
+## 3. Check Existing Installations
+
+Run the following commands in your terminal to verify whether required software is already present on your machine:
 
 ```bash
-python3.12 --version
+# Check Python version
+python3.12 --version || python3 --version
+
+# Check Node.js and npm versions
 node --version
 npm --version
+
+# Check Corepack and pnpm versions
 corepack --version
 pnpm --version
-mongod --version
-mongosh --version
+
+# Check Git
+git --version
 ```
 
-### How to Interpret the Output
-
-* **Tool is installed:** You will see a version string (e.g., `Python 3.12.15`, `v22.12.0`, `db version v8.0.4`).  
-  👉 **Action:** Compare the version against the [Prerequisites](#2-prerequisites) table. If it meets the requirement, **skip installing that tool**.
-* **Tool is missing:** You will see an error such as `command not found: <tool>` or `zsh: command not found: <tool>`.  
-  👉 **Action:** Proceed to [Section 4](#4-install-missing-prerequisites) and follow the installation instructions only for the missing tool.
+### Interpreting the Results
+- **Python:** Must output `Python 3.12.x`. If it displays Python 3.10 or 3.11, install Python 3.12.
+- **Node.js:** Must output `v18.x.x`, `v20.x.x`, or higher.
+- **pnpm:** If `command not found: pnpm`, enable it using `corepack enable` (bundled with Node.js).
+- **MongoDB:** To test connectivity to an existing MongoDB server, you can optionally check `mongosh --version`.
 
 ---
 
-## 4. Install Missing Prerequisites
+## 4. Step-by-Step Installation & Setup
 
-Follow the instructions below **only for tools identified as missing or incompatible** in Section 3.
+Follow these steps sequentially to set up and launch the application.
 
-### macOS (Recommended: Homebrew)
+### Step 1: Clone the Application Repository
+Clone this repository to your preferred local workspace:
 
-#### 1. Homebrew (Package Manager)
-If Homebrew is not installed, install it by running:
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-Verify:
-```bash
-brew --version
-```
-
-#### 2. Python 3.12
-```bash
-brew install python@3.12
-```
-Verify:
-```bash
-python3.12 --version
-# Expected: Python 3.12.x
-```
-
-#### 3. Node.js & npm (v20+ LTS)
-```bash
-brew install node
-```
-Verify:
-```bash
-node --version
-npm --version
-```
-
-#### 4. Corepack & pnpm
-Node.js comes bundled with `corepack`. Enable it to use `pnpm`:
-```bash
-corepack enable
-pnpm --version
-```
-*Alternative (if `corepack` is unavailable):*
-```bash
-npm install -g pnpm
-pnpm --version
-```
-
-#### 5. MongoDB Community Server & mongosh
-Tap the official MongoDB Homebrew repository and install:
-```bash
-brew tap mongodb/brew
-brew install mongodb-community
-brew install mongosh
-```
-Verify:
-```bash
-mongod --version | head -n 1
-mongosh --version
+git clone <COMPANY_REPO_URL>/fraud-alert-assistant.git
+cd fraud-alert-assistant
 ```
 
 ---
 
-### Linux (Ubuntu / Debian Guidance)
+### Step 2: Clone the Official MongoDB MCP Server
+The MongoDB MCP Server is an official open-source project by MongoDB (`@mongodb-js/mongodb-mcp-server`) that is maintained in a separate repository.
 
-* **Python 3.12:**
-  ```bash
-  sudo apt update && sudo apt install -y python3.12 python3.12-venv python3.12-dev
-  ```
-* **Node.js (LTS via NodeSource):**
-  ```bash
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt install -y nodejs
-  sudo corepack enable
-  ```
-* **MongoDB Community Server:** Follow the official MongoDB Linux guide: [Install MongoDB Community Edition on Ubuntu](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-ubuntu/).
-* **MongoDB Shell (`mongosh`):** Follow [Install mongosh on Linux](https://www.mongodb.com/docs/mongodb-shell/install/).
-
----
-
-## 5. Clone the Fraud Alert Assistant Repository
-
-Clone the application repository to your local development machine. You can clone it into any workspace directory of your choice (e.g., `~/Documents` or `~/projects`):
+Clone the official repository into a separate sibling directory:
 
 ```bash
-# Navigate to your preferred workspace
-cd ~/Documents
+# Move to parent folder
+cd ..
 
-# Clone the company repository (replace placeholder with your actual Git URL)
-git clone <COMPANY_REPOSITORY_URL>/Fraud-alert-assistant.git
-
-# Enter the project directory
-cd Fraud-alert-assistant
-```
-
----
-
-## 6. Set Up MongoDB Locally
-
-The application connects to a local MongoDB instance running on port `27017`.
-
-### Step 1: Start MongoDB Community Server
-
-* **macOS (Homebrew):**
-  ```bash
-  brew services start mongodb-community
-  ```
-* **Linux (systemd):**
-  ```bash
-  sudo systemctl start mongod
-  ```
-
-### Step 2: Verify MongoDB is Running
-
-* **macOS:**
-  ```bash
-  brew services list
-  # Confirm "mongodb-community" displays status "started"
-  ```
-* **Linux:**
-  ```bash
-  sudo systemctl status mongod
-  ```
-
-### Step 3: Connect Using `mongosh`
-
-Open the MongoDB shell to confirm port `27017` is accepting connections:
-
-```bash
-mongosh "mongodb://127.0.0.1:27017"
-```
-
-Inside the shell, verify the target database:
-
-```javascript
-// Switch to the project database
-use bankdemo
-
-// Check if collection exists and has documents
-db.fraud_alerts.countDocuments()
-
-// Exit the shell
-exit
-```
-
-*Note:* If `countDocuments()` returns `0`, proceed directly to Section 7 to populate the initial records.
-
----
-
-## 7. Seed the MongoDB Database
-
-> [!CAUTION]
-> **Data Deletion Warning:** Running `Scripts/seed.py` executes `collection.delete_many({})`. It will **wipe all existing records** in `bankdemo.fraud_alerts` before inserting fresh mock data. Do not run this script against a production database containing real customer data.
-
-### Script Details (Verified from `Scripts/seed.py`)
-
-* **Actual Path:** `Scripts/seed.py`
-* **Purpose:** Generates a synthetic dataset of **exactly 150** banking fraud alerts with realistic transaction metadata, customer references, risk scores, rule triggers, analyst notes, and decision histories.
-* **Database & Collection Populated:** `bankdemo.fraud_alerts`
-* **Distribution of 150 Alerts:**
-  * **90 False Positives (~60%):** Low/Medium risk alerts closed after customer contact.
-  * **23 Confirmed Fraud (~15%):** High/Critical risk alerts with cards blocked and SAR review flags.
-  * **37 Open Cases (~25%):** Unresolved alerts actively queued for secondary fraud triage.
-* **Indexes Created Automatically:**
-  * `alert_id` (Unique index)
-  * `status` (Ascending)
-  * `risk_score` (Ascending)
-  * `customer_ref` (Ascending)
-  * `created_at` (Ascending)
-* **Idempotency:** Yes. Because it deletes existing records before re-inserting, you can run it multiple times without accumulating duplicates; the collection will always reset to 150 records.
-
-### Prerequisites to Run `seed.py`
-
-1. MongoDB must be running locally on `127.0.0.1:27017`.
-2. Python virtual environment must be active with `pymongo` and `python-dotenv` installed (see [Sections 9 & 10](#9-create-python-virtual-environment)).
-
-### Seeding Command
-
-Run the seeder from the repository root:
-
-```bash
-# Ensure your virtual environment is active
-source .venv/bin/activate
-
-# Execute the seeder
-python Scripts/seed.py
-```
-
-### Expected Terminal Output
-
-```text
-Connecting to MongoDB at mongodb://127.0.0.1:27017...
-
-==================================================
-MongoDB Seeding Summary
-==================================================
-Database:          bankdemo
-Collection:        fraud_alerts
-Inserted:          150
- - False Positive: 90 (60.0%)
- - Confirmed Fraud:23 (15.3%)
- - Open:           37 (24.7%)
-
-Created Indexes:
- - _id_
- - alert_id_1
- - status_1
- - risk_score_1
- - customer_ref_1
- - created_at_1
-==================================================
-```
-
-### Verify the Seeded Data in `mongosh`
-
-```bash
-mongosh "mongodb://127.0.0.1:27017/bankdemo" --eval "
-  print('Total Alerts: ' + db.fraud_alerts.countDocuments());
-  print('Sample Alert: ' + db.fraud_alerts.findOne({}, {alert_id: 1, risk_level: 1, status: 1}));
-"
-```
-
----
-
-## 8. MongoDB MCP Server Prerequisite
-
-The **official MongoDB MCP Server** is an open-source project maintained by MongoDB in a separate repository:
-🔗 **[https://github.com/mongodb-js/mongodb-mcp-server](https://github.com/mongodb-js/mongodb-mcp-server)**
-
-The MCP Server communicates with our Python client over standard I/O (`stdio`) using Node.js.
-
-### Building the Official MCP Server from GitHub Source
-
-You can clone the MCP server repository into **any folder outside of this project** (e.g., `~/Downloads` or `~/projects`):
-
-```bash
-# 1. Clone the official MongoDB MCP Server repository
-cd ~/Downloads
+# Clone the official MongoDB MCP server repository
 git clone https://github.com/mongodb-js/mongodb-mcp-server.git
 cd mongodb-mcp-server
+```
 
-# 2. Install dependencies using pnpm
+---
+
+### Step 3: Build the Official MongoDB MCP Server
+The official MongoDB MCP server is a TypeScript monorepo built using `pnpm`.
+
+```bash
+# Enable corepack if pnpm is not available
+corepack enable
+
+# Install server dependencies
 pnpm install
 
-# 3. Build the TypeScript source code into ESM JavaScript
+# Compile TypeScript packages into JavaScript
 pnpm run build
 ```
 
-### Verify the Compiled Entry Point Exists
-
-Confirm that the compiled JavaScript entry point was generated:
+#### Identify the Compiled Entry Point
+After the build completes, verify that the compiled ESM entry point exists:
 
 ```bash
-ls -la packages/mongodb-mcp-server/dist/esm/index.js
+ls -l packages/mongodb-mcp-server/dist/esm/index.js
 ```
 
-Copy the **absolute path** to this `index.js` file. For example:
-```text
-/Users/yourusername/Downloads/mongodb-mcp-server/packages/mongodb-mcp-server/dist/esm/index.js
-```
-You will paste this path into the fraud assistant's `.env` file in [Section 11](#11-configure-environment-variables).
-
-> [!TIP]
-> **Automatic `npx` Fallback:** If you do not wish to build the MCP server from source, leave `MONGODB_MCP_SERVER_PATH` blank in `.env`. The client in `Clients/mongodb_mcp_client.py` will automatically fall back to executing `npx -y mongodb-mcp-server@3.1.0`.
+Note the absolute path to this file (e.g., `/Users/<username>/workspace/mongodb-mcp-server/packages/mongodb-mcp-server/dist/esm/index.js` or `/home/<username>/mongodb-mcp-server/packages/mongodb-mcp-server/dist/esm/index.js`). You will reference this path in your `.env` file.
 
 ---
 
-## 9. Create Python Virtual Environment
-
-Navigate back to your `Fraud-alert-assistant` repository root:
+### Step 4: Create Python 3.12 Virtual Environment
+Return to the `fraud-alert-assistant` application directory and create an isolated Python 3.12 virtual environment:
 
 ```bash
-cd ~/Documents/Fraud-alert-assistant
-```
+# Return to the application directory
+cd ../fraud-alert-assistant
 
-Create and activate a virtual environment named `.venv` using **Python 3.12**:
-
-### macOS / Linux
-```bash
 # Create virtual environment using Python 3.12
 python3.12 -m venv .venv
 
-# Activate the virtual environment
+# Activate the virtual environment:
+# On macOS / Linux:
 source .venv/bin/activate
 ```
 
-### Windows (PowerShell)
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+Verify your active Python path:
+```bash
+which python
+python --version
+# Output must point to .venv and show Python 3.12.x
 ```
-
-### Why a Virtual Environment is Recommended
-A virtual environment ensures your application runs with the exact pinned package versions specified in `requirements.txt`. It isolates the project from system Python packages and prevents macOS LibreSSL warnings and dependency conflicts.
 
 ---
 
-## 10. Install Python Dependencies
-
-With the virtual environment active, install the Python application dependencies:
+### Step 5: Install Python Dependencies
+Install the required application dependencies, LangGraph packages, MCP adapters, and test suite:
 
 ```bash
-# Ensure pip is up to date
-python -m pip install --upgrade pip
-
-# Install project dependencies
-python -m pip install -r requirements.txt
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
-
-> [!NOTE]
-> Python dependencies (`langgraph`, `langchain-groq`, `pymongo`, etc.) are installed strictly inside `.venv`. They are completely independent of the Node.js/pnpm packages used by the separate MongoDB MCP server.
 
 ---
 
-## 11. Configure Environment Variables
-
-The application requires an environment file named `.env` in the project root. A safe template with placeholders is provided as `.env.example`.
-
-### Step 1: Create `.env` from Template
+### Step 6: Configure Environment Variables
+Copy the template configuration file to `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-### Step 2: Configure Your Settings
+Open `.env` in your editor and configure your environment settings. See the next section for full variable definitions.
 
-Open `.env` in your code editor and provide your values:
+---
 
-```env
+## 5. Environment Variables Reference
+
+All application settings are managed through environment variables loaded via `config/settings.py`.
+
+### Configuration Options
+
+| Variable Name | Required | Default Value | Description |
+| :--- | :---: | :--- | :--- |
+| `MDB_MCP_CONNECTION_STRING` | **Yes** | None | Full MongoDB connection URI passed to the MCP server child process. Supports standard URIs and Atlas SRV records with authentication, replica sets, and TLS. |
+| `MDB_MCP_READ_ONLY` | No | `"true"` | Enforces read-only mode in the official MongoDB MCP server. When enabled, only read operations (`find`, `count`, etc.) are exposed. |
+| `MONGODB_MCP_SERVER_PATH` | No | Auto-discovered | Path to the compiled official MongoDB MCP Server entry point (`packages/mongodb-mcp-server/dist/esm/index.js`). If unset, searches standard paths in `Downloads`, `Documents`, or workspace root. |
+| `MONGODB_URI` | No | None | Fallback connection URI if `MDB_MCP_CONNECTION_STRING` is not explicitly set. |
+| `MONGODB_DATABASE` | No | `"bankdemo"` | Target database name where fraud alert collections reside. |
+| `MONGODB_COLLECTION` | No | `"fraud_alerts"` | Target collection name containing fraud alert documents. |
+| `GROQ_API_KEY` | **Yes** | None | API key from Groq Console used for agent LLM tool calling. |
+| `GROQ_MODEL` | No | `"openai/gpt-oss-120b"` | Groq LLM model used for reasoning and tool orchestration. |
+| `MAX_RESULT_ROWS` | No | `50` | Maximum number of documents returned by a single `find` query (bounded between `1` and `500`). |
+| `MCP_TIMEOUT_SECONDS` | No | `30` | Subprocess timeout in seconds for executing an MCP tool call. |
+| `AGENT_TIMEOUT_SECONDS` | No | `120` | End-to-end timeout in seconds for agent reasoning and response synthesis. |
+| `DEBUG` | No | `"false"` | When set to `"true"`, outputs internal tool selection and argument diagnostics in the terminal. |
+
+---
+
+### Safe Production `.env` Template
+
+Create your `.env` file using the template below:
+
+```bash
 # ==============================================================================
-# Fraud Alert Assistant - Environment Configuration
+# Fraud Alert Assistant - Production Configuration Template
 # ==============================================================================
 
-# 1. Groq API Key (Required for LLM tool calling)
-# Obtain your free API key from https://console.groq.com
-GROQ_API_KEY="gsk_your_actual_groq_api_key_here"
+# 1. Groq LLM Credentials (Required)
+GROQ_API_KEY="<your_groq_api_key_here>"
+GROQ_MODEL="openai/gpt-oss-120b"
 
-# 2. Local MongoDB Database Settings
-MONGODB_URI="mongodb://127.0.0.1:27017"
-MONGODB_DATABASE="bankdemo"
-MONGODB_COLLECTION="fraud_alerts"
+# 2. Target Database & Collection Scope
+MONGODB_DATABASE="fraud_operations"
+MONGODB_COLLECTION="alerts"
 
-# 3. Official MongoDB MCP Server Settings
-# Connection URI passed to the MCP server subprocess
-MDB_MCP_CONNECTION_STRING="mongodb://127.0.0.1:27017/bankdemo"
+# 3. MongoDB MCP Connection String
+# Example 1: Enterprise Internal MongoDB with TLS and authentication:
+MDB_MCP_CONNECTION_STRING="mongodb://<username>:<password>@mongo-cluster.internal.corp:27017/fraud_operations?authSource=admin&ssl=true"
 
-# Enforce read-only safety (prevents database writes/deletions)
+# Example 2: MongoDB Atlas Cloud Cluster:
+# MDB_MCP_CONNECTION_STRING="mongodb+srv://<username>:<password>@prod-cluster.mongodb.net/fraud_operations?retryWrites=true&w=majority"
+
+# Enforce strict read-only access (Recommended: true)
 MDB_MCP_READ_ONLY="true"
 
-# 4. Path to Compiled MongoDB MCP Server (From Section 8)
-# IMPORTANT: Must point to the compiled 'index.js' file, NOT the repository root folder!
+# 4. Path to Compiled MongoDB MCP Server
 MONGODB_MCP_SERVER_PATH="/absolute/path/to/mongodb-mcp-server/packages/mongodb-mcp-server/dist/esm/index.js"
 
-# 5. Optional Debug Mode (Set to "true" to display raw tool calls and parameters)
+# 5. Operational Bounds & Timeouts
+MAX_RESULT_ROWS="50"
+MCP_TIMEOUT_SECONDS="30"
+AGENT_TIMEOUT_SECONDS="120"
 DEBUG="false"
 ```
 
-> [!WARNING]
-> Never commit `.env` to Git. It contains private API credentials. The file is already listed in `.gitignore`.
+> [!CAUTION]
+> Never commit your `.env` file or store raw production database passwords in source control. Ensure `.env` is listed in `.gitignore`.
 
 ---
 
-## 12. Verify MongoDB and MCP Client Connection
+## 6. MCP Server & Client Architecture
 
-Before launching the full agent, verify that your local MongoDB database, seeded records, and MCP tool discovery are working properly.
+Understanding how the Python client and Node.js MCP server communicate is critical for troubleshooting and operational monitoring:
 
-Run the standalone client test:
+1. **Separate Build Artifact:** The official MongoDB MCP server (`@mongodb-js/mongodb-mcp-server`) is a TypeScript application that must be cloned and compiled separately using Node.js and pnpm.
+2. **Process-Level Integration (stdio):** The Python client uses `langchain-mcp-adapters` with the standard input/output (`stdio`) transport.
+3. **No Separate Server Daemon Needed:** When you initialize the client or start the agent, the Python application **automatically spawns the Node.js process** (`node <MONGODB_MCP_SERVER_PATH> --transport stdio`). You do **not** need to run a separate background service or web server for MCP.
+4. **Environment Isolation:** Database credentials and the read-only flag are passed directly to the spawned child process through environment variables (`MDB_MCP_CONNECTION_STRING`, `MDB_MCP_READ_ONLY`).
+5. **Client-Level Safeguards:** The Python client intercepts all tool executions through `SafeToolInterceptor`:
+   - Enforces tool whitelisting (`find` and `count` only).
+   - Validates that queries only access the configured `MONGODB_DATABASE` and `MONGODB_COLLECTION`.
+   - Bounds the query `limit` parameter to prevent accidental memory exhaustion or huge result payloads.
+
+---
+
+## 7. Verify MCP Tool Discovery & Connectivity
+
+Before running the conversational agent, run the standalone client diagnostic script to test your connection string, Node.js process launch, and tool discovery:
 
 ```bash
-# Must be executed from the project root with .venv active
-python Clients/mongodb_mcp_client.py
+# Ensure virtual environment is active
+source .venv/bin/activate
+
+# Execute MCP client diagnostics
+python clients/mcp_client.py
 ```
 
-*(Note: Ensure folder capitalization is preserved: `Clients/mongodb_mcp_client.py`)*
-
-### Expected Successful Output
+### Expected Success Output
 
 ```text
+============================================================
+MongoDB MCP Client Diagnostics
+============================================================
+Server Entrypoint: /path/to/mongodb-mcp-server/packages/mongodb-mcp-server/dist/esm/index.js
+Target Database:   fraud_operations
+Target Collection: alerts
+Read-Only Mode:    True
+
 Connecting to MongoDB MCP Server...
+Successfully discovered 2 approved tools:
 
-MCP connection initialized.
-Available tools: 18
+ - Tool: count
+   Description: Gets the number of documents in a MongoDB collection using db.collection.count() and query as an optional filter parameter
+ - Tool: find
+   Description: Run a find query against a MongoDB collection
 
-Tool: aggregate-db
-Tool: aggregate
-Tool: collection-indexes
-Tool: collection-schema
-Tool: collection-storage-size
-Tool: connect
-Tool: count
-Tool: db-stats
-Tool: disconnect
-Tool: explain
-Tool: export
-Tool: find
-Tool: list-collections
-Tool: list-connections
-Tool: list-databases
-Tool: mongodb-logs
-Tool: search-knowledge
-Tool: list-knowledge-sources
---------------------------------------------------
+All health checks passed.
 ```
+
+If the diagnostic command succeeds, your environment is ready to start the agent.
 
 ---
 
-## 13. Run the LangGraph Agent
+## 8. Run the LangGraph Conversational Agent
 
 Launch the interactive conversational fraud assistant from the repository root:
 
@@ -527,140 +358,204 @@ Launch the interactive conversational fraud assistant from the repository root:
 python -m agents.fraud_agent
 ```
 
-### How the MCP Subprocess Works
-When you execute `fraud_agent.py`, the Python `MultiServerMCPClient` automatically spawns the compiled Node.js MongoDB MCP server as a subprocess over standard input/output (`stdio`). **You do not need to run a separate terminal command or background daemon for the MCP server.**
-
 ### Session Startup Banner
 
 ```text
-Connecting to Fraud Intelligence Assistant...
-Assistant ready! Conversation memory active.
+Connecting to Banking Fraud Alert Assistant...
+Assistant ready! Multi-turn conversational memory active.
 
-=======================================================
+============================================================
        BANKING FRAUD ALERT ASSISTANT
-=======================================================
-Ask any question about fraud alerts.
-Type 'exit' to stop, or 'debug on/off' to toggle tool logs.
+============================================================
+Ask any question regarding fraud alerts, risks, or analyst outcomes.
+Commands: 'exit' / 'quit' to terminate, 'debug on/off' to toggle tool logs.
 
-You: 
+You:
+```
+
+### Supported Interactive Commands
+
+- `exit` or `quit`: Safely terminates the session and frees resources.
+- `debug on`: Toggles verbose logging, displaying tool calls, query filters, and execution statuses.
+- `debug off`: Returns to clean, professional conversational output.
+
+### Example Queries
+
+#### 1. Metric / Count Query
+> **You:** `How many high risk alerts are currently open?`  
+> **Assistant:** `There are currently 14 high-risk alerts in Open status awaiting analyst review.`
+
+#### 2. Detailed Ticket Summary
+> **You:** `Summarize alert ALT-8921.`  
+> **Assistant:**  
+> **Alert ALT-8921 – Executive Summary**  
+> - **Pattern:** Unusual Overseas Transaction Spike  
+> - **Risk Level:** High (Risk Score: 84.0)  
+> - **Transaction Details:** EUR 4,850.00 at Airline Ticket Office from Rome, Italy  
+> - **Customer:** CUST-49102  
+> - **Status:** Under Review (Assigned to analyst.chen@bank.com)
+
+#### 3. Multi-Turn Follow-Up (Conversational Memory)
+> **You:** `Who investigated it?`  
+> **Assistant:** `Alert ALT-8921 was investigated by analyst.chen@bank.com.` *(The agent remembers the context without re-asking for the ticket ID).*
+
+---
+
+## 9. Automated Testing Suite
+
+The repository includes a comprehensive `pytest` test suite covering configuration validation, argument bounding, scope protection, conversational memory, and live MCP integration.
+
+### Run Unit Tests (Mocked / Offline)
+To run the standard unit tests without requiring a live MongoDB connection:
+
+```bash
+pytest
+```
+
+**Expected Output:**
+```text
+============================= test session starts ==============================
+collected 22 items / 1 deselected / 21 selected
+
+tests/test_agent.py .....                                                [ 23%]
+tests/test_mcp_client.py ......                                          [ 52%]
+tests/test_safety.py ....                                                [ 71%]
+tests/test_settings.py ......                                            [100%]
+
+======================= 21 passed, 1 deselected in 2.43s =======================
+```
+
+### Run Live Integration Tests
+To execute integration tests against your configured live MongoDB server and compiled MCP server:
+
+```bash
+pytest -m "not integration or integration"
+```
+
+### Test Suite Structure
+
+| Test File | Focus Area |
+| :--- | :--- |
+| [tests/test_settings.py](tests/test_settings.py) | Validates environment variable parsing, bounds enforcement, URI credential masking, and server path resolution. |
+| [tests/test_mcp_client.py](tests/test_mcp_client.py) | Tests `SafeToolInterceptor`, ensuring write tools are rejected, `limit` arguments are bounded, and timeouts trigger cleanly. |
+| [tests/test_safety.py](tests/test_safety.py) | Tests edge cases: non-integer limits, negative limits, and unauthorized database/collection scope rejections. |
+| [tests/test_agent.py](tests/test_agent.py) | Tests LangGraph `ask()` helper, multi-turn memory preservation across turns, and timeout handling. |
+| [tests/test_mongodb_mcp.py](tests/test_mongodb_mcp.py) | Live integration test verifying tool discovery, `count`, and `find` queries against the real database. |
+
+---
+
+## 10. Troubleshooting Guide
+
+| Issue / Error Message | Root Cause | Resolution |
+| :--- | :--- | :--- |
+| `ConfigurationError: Could not find the compiled MongoDB MCP server entry point` | `MONGODB_MCP_SERVER_PATH` is incorrect, or the TypeScript build was not run. | 1. Ensure you cloned the MongoDB MCP server.<br>2. Run `pnpm run build` inside the server repo.<br>3. Verify the file `packages/mongodb-mcp-server/dist/esm/index.js` exists.<br>4. Set `MONGODB_MCP_SERVER_PATH` in `.env` to the absolute path of `index.js`. |
+| `ConfigurationError: MDB_MCP_CONNECTION_STRING ... is required` | `.env` was not created or connection URI is missing. | Copy `.env.example` to `.env` and configure `MDB_MCP_CONNECTION_STRING`. |
+| `ConfigurationError: GROQ_API_KEY is not configured in .env` | `GROQ_API_KEY` is missing or empty. | Obtain an API key from [Groq Console](https://console.groq.com) and set it in `.env`. |
+| `MCPConnectionError: Failed to connect to MongoDB MCP Server` | Node.js is missing from your system path or Node version is incompatible. | Ensure `node --version` outputs v18+ or v20+ and Node is executable in your terminal. |
+| `MongoDBSafetyError: Unauthorized database ...` | The LLM attempted to query a database outside your configured `MONGODB_DATABASE`. | By design, `SafeToolInterceptor` blocks cross-database access. If your data lives in another database, update `MONGODB_DATABASE` in `.env`. |
+| `MongoDBSafetyError: The result limit must be an integer` | A query passed a non-integer limit. | The client automatically bounds integer limits. Verify custom queries or increase `MAX_RESULT_ROWS` in `.env`. |
+| `TimeoutError: Agent timed out after 120 seconds` | The Groq API or MongoDB query took longer than the configured timeout. | Increase `AGENT_TIMEOUT_SECONDS` or `MCP_TIMEOUT_SECONDS` in `.env`. Check MongoDB network latency. |
+| `ServerSelectionTimeoutError` / Connection Refused | MongoDB cluster is unreachable or firewall blocks port 27017. | 1. Verify MongoDB network access.<br>2. For Atlas, verify your IP is whitelisted in Network Access.<br>3. For corporate clusters, ensure VPN is connected. |
+
+---
+
+## 11. Security, Governance & Access Control
+
+### 1. Multi-Tiered Read-Only Enforcement
+Production security requires defense in depth:
+- **Database Role:** The MongoDB user configured in `MDB_MCP_CONNECTION_STRING` should be granted **strictly read-only roles** (e.g., `read` role on the specific database). Never configure a `readWrite` or `dbAdmin` credential.
+- **Server Flag:** The official MCP server subprocess is launched with `MDB_MCP_READ_ONLY="true"`.
+- **Client Interceptor:** Python's `SafeToolInterceptor` intercepts all tool calls and enforces `READ_ONLY_MONGODB_TOOLS = frozenset({"find", "count"})`. Any write, update, drop, or administration command is immediately rejected before execution.
+
+### 2. Database & Collection Scoping
+To prevent accidental access to other collections or system databases:
+- The interceptor enforces that `database == settings.mongodb_database` and `collection == settings.mongodb_collection`.
+- Attempts to query `admin`, `config`, `local`, or other corporate collections trigger a `MongoDBSafetyError`.
+
+### 3. Credential Protection
+- Connection strings and API keys are strictly loaded from environment variables.
+- `Settings.__repr__()` implements automatic URI sanitization, replacing database passwords (`mongodb://user:***@host`) and masking Groq API keys with `***` to prevent accidental leakage in logs or stack traces.
+
+### 4. Enterprise LLM Data Privacy
+- Records retrieved from MongoDB are passed into the Groq LLM context window to generate natural language summaries.
+- Before deploying to production, ensure your organization has executed an enterprise agreement with Groq covering data residency, HIPAA/SOC2 compliance, and **Zero Data Retention (ZDR)** to ensure customer records are not stored or used for model training.
+
+---
+
+## 12. Production Deployment Checklist & Architecture Limitations
+
+Before deploying this application to a production enterprise environment, review the following architecture limitations and deployment requirements:
+
+### Architecture Limitations
+
+1. **Ephemeral In-Memory Conversation State:**
+   - **Current State:** The application uses LangGraph `MemorySaver`, which stores conversation checkpoints in local process memory (RAM).
+   - **Production Requirement:** For multi-container or distributed cloud deployments (e.g., Kubernetes, Amazon ECS, Google Cloud Run), replace `MemorySaver` with a persistent external checkpointer, such as `langgraph-checkpoint-postgres` or Redis, so sessions persist across container restarts and scale across replicas.
+
+2. **Interface Protocol (CLI vs. API):**
+   - **Current State:** The entry point is an interactive terminal CLI (`python -m agents.fraud_agent`).
+   - **Production Requirement:** Wrap the agent graph (`create_fraud_agent_graph()`) in a REST or WebSocket service using **FastAPI** to integrate with enterprise fraud case management systems.
+
+3. **Subprocess stdio Scaling:**
+   - **Current State:** The client uses `stdio` to spawn a dedicated Node.js MCP server process per Python agent process.
+   - **Production Requirement:** For high-concurrency microservice architectures, deploy the MongoDB MCP server as a standalone HTTP/SSE service and configure the Python client with HTTP/SSE transports.
+
+4. **Telemetry & Audit Logging:**
+   - **Current State:** Logging is directed to standard output with debug toggle.
+   - **Production Requirement:** Integrate structured JSON logging and distributed tracing (e.g., OpenTelemetry, Datadog, or LangSmith) to audit every database query and user prompt for compliance.
+
+---
+
+## 13. Development Utilities (Optional Seed Script)
+
+The repository contains an optional developer utility at `Scripts/seed.py`.
+
+> [!CAUTION]
+> **DO NOT EXECUTE `Scripts/seed.py` IN PRODUCTION.**  
+> The script contains `collection.delete_many({})`, which will **permanently erase existing data** in the target collection. It is strictly intended for isolated local development sandboxes.
+
+If you are developing locally in an empty sandbox environment and wish to generate synthetic test records:
+
+```bash
+# ONLY run this against an isolated local test database:
+python Scripts/seed.py
 ```
 
 ---
 
-## 14. Example Questions & Conversational Flow
-
-The assistant uses **LangGraph `MemorySaver`** to maintain conversational memory across the entire terminal session. You can ask initial questions and follow up naturally without repeating ticket IDs.
-
-### 1. Direct Counts & Status Checks
-```text
-You: How many total fraud alerts are in the database?
-Assistant: There are 150 fraud alert cases in the system.
-
-You: How many of those are located in Canada?
-Assistant: There are 28 fraud alerts involving transactions located in Canada.
-```
-
-### 2. Multi-Ticket Query (Table Output)
-```text
-You: Show me the top 3 highest risk alerts.
-Assistant:
-Here are the top 3 alerts with the highest risk scores:
-
-| Alert ID | Alert Type | Risk Score | Risk Level | Status | Transaction |
-|---|---|---|---|---|---|
-| ALT-1087 | ATM_SUSPICIOUS_PIN_RETRIES | 99.3 | CRITICAL | Confirmed Fraud | $15,060.03 USD @ Walmart Supercenter (Tokyo) |
-| ALT-1123 | GEO_VELOCITY_MISMATCH | 97.8 | CRITICAL | Confirmed Fraud | $5,459.06 USD @ Walmart Supercenter (Paris) |
-| ALT-1027 | NEW_UNRECOGNIZED_DEVICE_LOGIN | 94.3 | CRITICAL | Confirmed Fraud | £13,656.44 GBP @ Western Union (New York) |
-```
-
-### 3. Case Summary & Conversational Follow-Ups (Memory in Action)
-```text
-You: Summarize alert ALT-1003.
-Assistant:
-Alert Summary – ALT-1003 (ObjectId: 6ad77c4b3dfecbdd108a6b47)
-
-- Pattern: Flagged for GEO VELOCITY MISMATCH (Medium Risk, Score 47.5).
-- Transaction: $9,205.12 USD purchase at Amazon US from Toronto, Canada via Online channel.
-- Customer: Reference CUST-78372.
-- Outcome: Closed as False Positive. The analyst contacted the cardholder, who verified 
-  the purchase as legitimate and consistent with their profile.
-
-You: Who investigated it?
-Assistant:
-The alert was investigated by analyst Kowalski (analyst.kowalski@bankdemo.com).
-
-You: What was the transaction amount?
-Assistant:
-The transaction amount was $9,205.12 USD.
-
-You: Why was it closed?
-Assistant:
-It was closed as a False Positive because Analyst Kowalski contacted the customer directly, 
-and the customer confirmed that the large Amazon purchase was legitimate.
-```
-
-### 4. Toggle Debugging On the Fly
-* Type `debug on` to display raw tool names, arguments, and execution statuses.
-* Type `debug off` to return to clean, conversational output.
-* Type `exit` or press `Ctrl + C` to end the session cleanly.
-
----
-
-## 15. Troubleshooting Guide
-
-| Issue / Error Message | Likely Cause | Solution |
-|---|---|---|
-| `zsh: command not found: python` | Virtual environment is not active or Python is not mapped in your shell. | Run `source .venv/bin/activate` or use `python3 -m agents.fraud_agent`. |
-| `ImportError: cannot import name 'create_agent' from 'langchain.agents'` | Old LangChain code or attempting to run with system Python 3.9. | The project uses LangGraph `StateGraph` in Python 3.12. Ensure `.venv` is activated. |
-| `ModuleNotFoundError: No module named 'Clients'` | Incorrect folder casing or running from outside repository root. | Ensure you run from the project root (`Fraud-alert-assistant`) and preserve capital `C` in `Clients`. |
-| `FileNotFoundError: MongoDB MCP Server not found: ...` | `MONGODB_MCP_SERVER_PATH` in `.env` is incorrect or points to a folder instead of `index.js`. | Verify the path points to `packages/mongodb-mcp-server/dist/esm/index.js`. If not building from source, leave the variable blank in `.env`. |
-| `ServerSelectionTimeoutError: 127.0.0.1:27017: Connection refused` | Local MongoDB Community Server is not running. | Run `brew services start mongodb-community` (macOS) or `sudo systemctl start mongod` (Linux). |
-| `ValueError: GROQ_API_KEY is missing from .env` | `.env` was not created or `GROQ_API_KEY` is empty. | Copy `.env.example` to `.env` and insert a valid API key from [Groq Console](https://console.groq.com). |
-| `Command failed: pnpm run build` | Node.js version is older than v18 or pnpm is missing. | Verify `node --version` is v18+ LTS and run `corepack enable` before building the MCP server. |
-| Zero alerts returned (`count: 0`) | MongoDB database was not seeded. | Run `python Scripts/seed.py` from the project root with `.venv` active. |
-| `LibreSSL Warning: urllib3 v2 only supports OpenSSL 1.1.1+` | macOS default Python 3.9 is being invoked instead of Homebrew Python 3.12. | Check `which python` with `.venv` active. Ensure `.venv` was created with `python3.12 -m venv .venv`. |
-
----
-
-## 16. Project Structure
-
-The project layout follows a modular structure:
+## 14. Project Directory Structure
 
 ```text
-Fraud-alert-assistant/
-├── .env.example             # Configuration template with placeholder values (Safe to commit)
-├── .gitignore                # Excludes secrets (.env), virtual environment (.venv/), and cache files
-├── README.md                 # Complete setup, architectural, and operational documentation
-├── architecture.md           # Architecture notes and component interactions
-├── pyrightconfig.json        # Pyright typing configuration with relative paths
-├── pyrefly.toml              # IDE linter configuration
-├── requirements.txt          # Production application dependencies
+fraud-alert-assistant/
+├── .env.example                  # Environment configuration template (Safe to commit)
+├── requirements.txt               # Application dependencies and test framework
+├── pytest.ini                     # Pytest runner configuration (asyncio mode, markers)
+├── pyrightconfig.json             # Python 3.12 typing configuration (0 errors)
+├── architecture.md                # Component architecture notes
+├── README.md                      # Production setup and operational documentation
+├── config/
+│   ├── __init__.py                # Package exports
+│   └── settings.py                # Centralized environment parsing, bounds & server resolution
+├── clients/
+│   ├── __init__.py                # Package exports & legacy module compatibility alias
+│   ├── mcp_client.py              # MultiServerMCPClient, SafeToolInterceptor & parameter bounding
+│   └── mongodb_mcp_client.py      # Backward-compatible client wrapper
 ├── agents/
-│   ├── __init__.py
-│   └── fraud_agent.py        # LangGraph StateGraph ReAct agent with MemorySaver & Groq LLM
-├── Clients/
-│   ├── __init__.py           # Python package marker
-│   └── mongodb_mcp_client.py # MultiServerMCPClient configured for official MongoDB MCP Server
+│   ├── __init__.py                # Package exports
+│   └── fraud_agent.py             # LangGraph StateGraph ReAct agent, MemorySaver & prompt
+├── tests/
+│   ├── __init__.py                # Test package marker
+│   ├── test_settings.py           # Configuration parsing & secret masking tests
+│   ├── test_mcp_client.py         # Interceptor, timeout & tool boundary tests
+│   ├── test_safety.py             # Database/collection scope validation tests
+│   ├── test_agent.py              # Agent conversational memory & timeout tests
+│   └── test_mongodb_mcp.py        # Live integration test against MongoDB MCP Server
 └── Scripts/
-    └── seed.py               # Database seeder (creates 150 synthetic bank fraud alerts & indexes)
+    └── seed.py                    # [DEV ONLY] Sandbox database seeder (Never run in prod)
 ```
 
 ---
 
-## 17. Security & Governance
+## License & Support
 
-1. **Read-Only Enforcement:**
-   * The MCP server subprocess is strictly launched with `MDB_MCP_READ_ONLY="true"`.
-   * The LangGraph agent restricts tool selection exclusively to read operations: `ALLOWED_TOOLS = {"find", "count"}`.
-   * Write, update, drop, or delete operations cannot be executed through the agent.
-2. **Credential Protection:**
-   * API keys (`GROQ_API_KEY`) and database URIs are loaded exclusively from local `.env`.
-   * `.env` is permanently excluded from Git via `.gitignore`.
-3. **Synthetic Sample Data:**
-   * All 150 alert records, customer IDs, analyst names, and notes generated by `Scripts/seed.py` are 100% synthetic mock data.
-   * Never import real cardholder PII or production banking credentials into a local demo environment.
-4. **Session Memory Scope:**
-   * The conversational memory powered by LangGraph `MemorySaver` is stored **in-memory** in RAM for the duration of the process.
-   * Conversation history is automatically cleared upon exiting the application (`exit` or terminal close) and is not persisted to disk.
-5. **Deployment Context:**
-   * The local `stdio` process architecture is designed for developer workstations, exploratory triage, and internal demo evaluations. It does not enforce multi-tenant enterprise authorization.
+Maintained by the Financial Crime & Operations Engineering Team. For questions or deployment assistance, open an internal ticket or reach out to the project maintainers.

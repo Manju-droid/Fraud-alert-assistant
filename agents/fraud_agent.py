@@ -1,94 +1,50 @@
 #!/usr/bin/env python3
 
 """
-Fraud Alert Assistant
-Conversational LangGraph StateGraph Agent + Groq LLM + Official MongoDB MCP Server
+LangGraph Conversational Agent for Banking Fraud Intelligence.
 
 Architecture:
-User Question -> Agent Node -> ToolNode (MCP Client) -> Agent Node -> Final Conversational Answer
-State Checkpointing: MemorySaver provides multi-turn conversational memory for seamless follow-up queries.
+User Question -> Agent Node (Groq LLM) -> ToolNode (MongoDB MCP) -> Agent Node -> Final Answer
+Multi-turn conversational memory is checkpointed via MemorySaver.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import asyncio
 import json
+import logging
+import sys
 import uuid
 import warnings
 from pathlib import Path
+from typing import Any, Optional
 
-# Suppress non-actionable deprecation warnings for cleaner CLI UX
+# Suppress non-actionable warnings for clean CLI output
 warnings.filterwarnings("ignore")
 
-# Ensure project root is in sys.path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Ensure project root is on sys.path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Handle case variation for Clients / clients package
-try:
-    import Clients as _Clients
-    sys.modules.setdefault("clients", _Clients)
-    import Clients.mongodb_mcp_client as _mcp_client
-    sys.modules.setdefault("clients.mongodb_mcp_client", _mcp_client)
-except ImportError:
-    pass
-
-from typing import Optional
-from dotenv import load_dotenv
-from pydantic import SecretStr
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph, MessagesState, START
-from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import SecretStr
 
-try:
-    from Clients.mongodb_mcp_client import get_mcp_tools
-except ImportError:
-    from Clients.mongodb_mcp_client import get_mcp_tools
-
-
-# ----------------------------------------
-# 1. Load environment variables
-# ----------------------------------------
-
-load_dotenv(PROJECT_ROOT / ".env")
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("api_key")
-
-if not GROQ_API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY is missing from .env"
-    )
-
-DATABASE = os.getenv(
-    "MONGODB_DATABASE", "bankdemo"
+from clients.mcp_client import (
+    MCPConnectionError,
+    get_mcp_tools,
 )
+from config.settings import ConfigurationError, Settings
 
-COLLECTION = os.getenv(
-    "MONGODB_COLLECTION", "fraud_alerts"
-)
+logger = logging.getLogger("fraud_alert.agent")
 
-DEBUG_MODE = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-
-
-# ----------------------------------------
-# 2. Approved MCP Tools
-# ----------------------------------------
-
-ALLOWED_TOOLS = {
-    "find",
-    "count"
-}
-
-
-# ----------------------------------------
-# 3. Conversational System Prompt
-# ----------------------------------------
-
-SYSTEM_PROMPT = ("""
+SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert, professional Banking Fraud Intelligence Assistant—communicating naturally, clearly, and concisely, like ChatGPT or a senior fraud operations colleague.
 
 You retrieve live fraud alert records from MongoDB using tools provided by the official MongoDB MCP Server.
@@ -132,187 +88,231 @@ Communication & Response Guidelines:
 5. Grounded Accuracy:
    - Base all answers strictly on returned MongoDB data. Never invent ticket IDs, names, or transaction numbers.
    - If no matching documents exist, politely inform the user.
-""").replace("<DATABASE>", DATABASE).replace("<COLLECTION>", COLLECTION)
+"""
 
 
-# ----------------------------------------
-# 4. LangGraph StateGraph Agent
-# ----------------------------------------
+def build_system_prompt(settings: Settings) -> str:
+    """Populate database and collection in system prompt template."""
+    return (
+        SYSTEM_PROMPT_TEMPLATE
+        .replace("<DATABASE>", settings.mongodb_database)
+        .replace("<COLLECTION>", settings.mongodb_collection)
+    )
+
+
+async def create_fraud_agent_graph(
+    settings: Settings,
+    checkpointer: Any = None,
+) -> CompiledStateGraph:
+    """Build and compile the LangGraph ReAct StateGraph for fraud alert triage."""
+    if not settings.groq_api_key:
+        raise ConfigurationError("GROQ_API_KEY is not configured in .env.")
+
+    tools = await get_mcp_tools(settings)
+    if not tools:
+        raise MCPConnectionError("No approved read-only tools available from MongoDB MCP Server.")
+
+    system_message = SystemMessage(content=build_system_prompt(settings))
+
+    llm = ChatGroq(
+        model=settings.groq_model,
+        api_key=SecretStr(settings.groq_api_key),
+        temperature=0,
+    )
+    llm_with_tools = llm.bind_tools(tools)
+
+    async def call_model(state: MessagesState) -> dict[str, Any]:
+        messages = state["messages"]
+        if not messages or not isinstance(messages[0], SystemMessage):
+            messages = [system_message] + list(messages)
+        response = await llm_with_tools.ainvoke(messages)
+        return {"messages": [response]}
+
+    tool_node = ToolNode(tools)
+
+    workflow = StateGraph(MessagesState)  # type: ignore[bad-specialization]
+    workflow.add_node("agent", call_model)
+    workflow.add_node("tools", tool_node)
+
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges("agent", tools_condition)
+    workflow.add_edge("tools", "agent")
+
+    active_checkpointer = checkpointer if checkpointer is not None else MemorySaver()
+    return workflow.compile(checkpointer=active_checkpointer)
+
+
+async def ask(
+    agent: Any,
+    question: str,
+    thread_id: str,
+    timeout_seconds: int = 120,
+) -> str:
+    """Invoke the agent with conversational memory state for the given thread_id."""
+    config: RunnableConfig = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
+
+    try:
+        response = await asyncio.wait_for(
+            agent.ainvoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=config,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"Agent timed out after {timeout_seconds} seconds awaiting LLM or tool response."
+        ) from exc
+
+    messages = response.get("messages", [])
+    if not messages:
+        raise RuntimeError("Agent produced an empty response.")
+
+    final_content: Any = messages[-1].content
+    if isinstance(final_content, str):
+        return final_content
+    if isinstance(final_content, list):
+        return "\n".join(
+            block["text"]
+            for block in final_content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return str(final_content)
+
 
 class FraudAlertAgent:
+    """Object-oriented wrapper preserving backwards compatibility with existing callers."""
 
-    def __init__(self, thread_id: Optional[str] = None, debug: bool = False):
-        self.app = None
-        self.tools = []
-        self.system_message = SystemMessage(content=SYSTEM_PROMPT)
+    def __init__(
+        self,
+        thread_id: Optional[str] = None,
+        debug: bool = False,
+        settings: Optional[Settings] = None,
+    ) -> None:
+        self.settings = settings or Settings.from_env()
         self.thread_id = thread_id or f"session-{uuid.uuid4().hex[:8]}"
-        self.debug = debug or DEBUG_MODE
+        self.debug = debug or self.settings.debug
+        self.app: Optional[CompiledStateGraph] = None
+        self.tools: list[Any] = []
         self.checkpointer = MemorySaver()
 
-    async def initialize(self):
-
-        print("\nConnecting to Fraud Intelligence Assistant...")
-
-        # Load MCP tools from existing client
-        all_tools = await get_mcp_tools()
-
-        # Filter to allowed tools
-        self.tools = [
-            tool
-            for tool in all_tools
-            if tool.name in ALLOWED_TOOLS
-        ]
-
-        if not self.tools:
-            raise RuntimeError(
-                "No approved MCP tools available from server."
-            )
-
-        if self.debug:
-            print("\n[DEBUG] Available MCP Tools:")
-            for tool in self.tools:
-                print(f" - {tool.name}")
-
-        # Validate and initialize Groq LLM
-        if not GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY is missing from .env")
-
-        llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            api_key=SecretStr(GROQ_API_KEY),
-            temperature=0
+    async def initialize(self) -> None:
+        """Initialize the LangGraph agent and establish MCP tool connections."""
+        logger.info("Initializing Fraud Alert Agent...")
+        self.app = await create_fraud_agent_graph(
+            settings=self.settings,
+            checkpointer=self.checkpointer,
         )
-
-        # Bind MCP tools to LLM
-        llm_with_tools = llm.bind_tools(self.tools)
-
-        # Define Agent node
-        async def call_model(state: MessagesState):
-            messages = state["messages"]
-            # Ensure system prompt is prepended to the context
-            if not isinstance(messages[0], SystemMessage):
-                messages = [self.system_message] + list(messages)
-            response = await llm_with_tools.ainvoke(messages)
-            return {"messages": [response]}
-
-        # Define Tool node
-        tool_node = ToolNode(self.tools)
-
-        # Build StateGraph
-        workflow = StateGraph(MessagesState) # type: ignore[bad-specialization]
-        workflow.add_node("agent", call_model)
-        workflow.add_node("tools", tool_node)
-
-        # Workflow edges: ReAct loop
-        workflow.add_edge(START, "agent")
-        workflow.add_conditional_edges("agent", tools_condition)
-        workflow.add_edge("tools", "agent")
-
-        # Compile LangGraph workflow with conversation checkpointer (Memory)
-        self.app = workflow.compile(checkpointer=self.checkpointer)
-
-        print("Assistant ready! Conversation memory active.\n")
-
-    # ------------------------------------
-    # 5. Process user question
-    # ------------------------------------
+        self.tools = await get_mcp_tools(self.settings)
 
     async def ask(self, question: str) -> str:
-
+        """Submit a query to the agent."""
         if self.app is None:
-            raise RuntimeError(
-                "Agent is not initialized."
-            )
+            raise RuntimeError("Agent is not initialized. Call 'await agent.initialize()' first.")
 
-        # Use thread_id for conversation memory state
+        # Invoke agent
         config: RunnableConfig = {
             "configurable": {
-                "thread_id": self.thread_id
+                "thread_id": self.thread_id,
             }
         }
 
-        response = await self.app.ainvoke(
-            {"messages": [HumanMessage(content=question)]},
-            config=config
+        response = await asyncio.wait_for(
+            self.app.ainvoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=config,
+            ),
+            timeout=self.settings.agent_timeout_seconds,
         )
 
-        # Optional Debug logging (only active when debug=True or DEBUG=true in .env)
         if self.debug:
-            for message in response["messages"]:
+            for message in response.get("messages", []):
                 tool_calls = getattr(message, "tool_calls", None)
                 if tool_calls:
                     for call in tool_calls:
-                        print(f"\n[DEBUG Tool Selected] {call['name']}")
+                        print(f"\n[DEBUG Tool Call] {call['name']}")
                         args = call.get("args", {})
                         sanitized_args = {k: v for k, v in args.items() if k != "connectionId"}
-                        print(
-                            "[DEBUG Parameters]",
-                            json.dumps(sanitized_args, indent=2, default=str)
-                        )
-
+                        print("[DEBUG Args]", json.dumps(sanitized_args, indent=2, default=str))
                 if isinstance(message, ToolMessage) or getattr(message, "type", "") == "tool":
                     status = "failure" if getattr(message, "status", None) == "error" else "success"
-                    tool_name = getattr(message, "name", "tool")
-                    print(f"[DEBUG Execution] {tool_name}: {status}")
+                    print(f"[DEBUG Result] {getattr(message, 'name', 'tool')}: {status}")
 
         final_message = response["messages"][-1]
-        return final_message.content
+        content: Any = final_message.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            )
+        return str(content)
 
 
-# ----------------------------------------
-# 6. Interactive Terminal
-# ----------------------------------------
+async def run_chat() -> None:
+    """Run interactive terminal chat loop."""
+    settings = Settings.from_env()
+    print("Connecting to Banking Fraud Alert Assistant...")
 
-async def main():
+    agent = FraudAlertAgent(settings=settings)
+    try:
+        await agent.initialize()
+    except Exception as exc:
+        print(f"\nInitialization Error: Could not start agent: {exc}")
+        raise SystemExit(1) from exc
 
-    agent = FraudAlertAgent()
-    await agent.initialize()
-
-    print("=" * 55)
+    print("Assistant ready! Multi-turn conversational memory active.\n")
+    print("=" * 60)
     print("       BANKING FRAUD ALERT ASSISTANT")
-    print("=" * 55)
-    print("Ask any question about fraud alerts.")
-    print("Type 'exit' to stop, or 'debug on/off' to toggle tool logs.\n")
+    print("=" * 60)
+    print("Ask any question regarding fraud alerts, risks, or analyst outcomes.")
+    print("Commands: 'exit' / 'quit' to terminate, 'debug on/off' to toggle tool logs.\n")
 
     while True:
         try:
-            question = (
-                await asyncio.to_thread(
-                    input,
-                    "You: "
-                )
-            ).strip()
+            question = (await asyncio.to_thread(input, "You: ")).strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
+            return
 
-            if question.lower() in {"exit", "quit", "q"}:
-                print("\nGoodbye!")
-                break
+        if question.lower() in {"exit", "quit", "q"}:
+            print("\nGoodbye!")
+            return
+        if not question:
+            continue
 
-            if not question:
-                continue
+        if question.lower() == "debug on":
+            agent.debug = True
+            print("[Debug mode enabled: tool calls and parameters will be displayed]\n")
+            continue
+        if question.lower() == "debug off":
+            agent.debug = False
+            print("[Debug mode disabled: clean conversational output]\n")
+            continue
 
-            if question.lower() == "debug on":
-                agent.debug = True
-                print("[Debug mode enabled: tool calls and parameters will be displayed]\n")
-                continue
-            elif question.lower() == "debug off":
-                agent.debug = False
-                print("[Debug mode disabled: clean conversational output]\n")
-                continue
-
-            print("\nThinking...")
+        print("\nThinking...")
+        try:
             answer = await agent.ask(question)
-
             print(f"\nAssistant:\n{answer}\n")
+        except TimeoutError:
+            print("\nAssistant: The request timed out. Please verify MCP server and Groq availability.\n")
+        except Exception as exc:
+            print(f"\nAssistant: I encountered an error fulfilling your request: {exc}\n")
 
-        except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
-            print("\nSession ended.")
-            break
-        except Exception as error:
-            print(f"\nError: {error}\n")
+
+def main() -> None:
+    """Application CLI entry point."""
+    try:
+        asyncio.run(run_chat())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\nGoodbye!")
+    main()
